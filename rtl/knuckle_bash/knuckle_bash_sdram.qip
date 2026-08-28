@@ -1,0 +1,18 @@
+# Minimal JTFrame SDRAM closure used by the board-local Knuckle Bash wrapper.
+# The generic JTFrame downloader and full framework QIP are intentionally
+# excluded: knuckle_bash_sdram_loader owns the index-0 byte stream.
+set_global_assignment -name VERILOG_FILE rtl/modules/jtframe/hdl/clocking/jtframe_frac_cen.v
+set_global_assignment -name VERILOG_FILE rtl/modules/jtframe/hdl/sdram/jtframe_sdram64_latch.v
+set_global_assignment -name VERILOG_FILE rtl/modules/jtframe/hdl/sdram/jtframe_sdram64_init.v
+set_global_assignment -name VERILOG_FILE rtl/modules/jtframe/hdl/sdram/jtframe_sdram64_rfsh.v
+set_global_assignment -name VERILOG_FILE rtl/modules/jtframe/hdl/sdram/jtframe_sdram64_bank.v
+set_global_assignment -name VERILOG_FILE rtl/modules/jtframe/hdl/sdram/jtframe_sdram64.v
+set_global_assignment -name VERILOG_FILE rtl/modules/jtframe/hdl/jtframe_board_sdram.v
+set_global_assignment -name VERILOG_FILE rtl/modules/jtframe/hdl/sdram/jtframe_ucache.v
+set_global_assignment -name VERILOG_FILE rtl/modules/jtframe/hdl/sdram/jtframe_romrq_bcache.v
+set_global_assignment -name VERILOG_FILE rtl/modules/jtframe/hdl/sdram/jtframe_romrq_xscache.v
+set_global_assignment -name VERILOG_FILE rtl/modules/jtframe/hdl/sdram/jtframe_romrq.v
+set_global_assignment -name VERILOG_FILE rtl/modules/jtframe/hdl/sdram/jtframe_ramslot_ctrl.v
+set_global_assignment -name VERILOG_FILE rtl/modules/jtframe/hdl/sdram/jtframe_rom_2slots.v
+set_global_assignment -name VERILOG_FILE rtl/modules/jtframe/hdl/sdram/jtframe_rom_1slot.v
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/knuckle_bash/knuckle_bash_sdram.sv

@@ -1,0 +1,8 @@
+set_global_assignment -name QIP_FILE rtl/pll.qip
+set_global_assignment -name QIP_FILE rtl/game.qip
+set_global_assignment -name QIP_FILE rtl/knuckle_bash/knuckle_bash.qip
+set_global_assignment -name SYSTEMVERILOG_FILE Arcade-KnuckleBash.sv
+set_global_assignment -name SDC_FILE Arcade-KnuckleBash.sdc
+
+set_global_assignment -name SEARCH_PATH rtl/modules/jt6295/hdl
+set_global_assignment -name SEARCH_PATH rtl/modules/fx68k/hdl
