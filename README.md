@@ -34,7 +34,7 @@ MAME models Knuckle Bash as:
   Local compact implementation derived from [nand2mario/z8086](https://github.com/nand2mario/z8086), with Batsugun/Dogyuun adaptations and Knuckle Bash-specific integration. See the retained [provenance and microcode notice](rtl/modules/v25_compact/UPSTREAM.md).
 
 - Save-state architecture references:
-  [WickerWaka](https://github.com/wickerwaka)'s Taito F2 and PGM work. This credit does not imply working save states in this core.
+  [WickerWaka](https://github.com/wickerwaka)'s Taito F2 and PGM work. 
 
 - Behavioral references:
   [MAME 0.288 Toaplan `kbash.cpp`](https://github.com/mamedev/mame/blob/mame0288/src/mame/toaplan/kbash.cpp),
