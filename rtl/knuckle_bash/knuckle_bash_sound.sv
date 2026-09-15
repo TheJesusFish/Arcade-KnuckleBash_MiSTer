@@ -18,9 +18,13 @@ module knuckle_bash_sound (
     input  logic               fx_enable,
     input  logic [ 1:0]        fx_level,
     input  logic               state_hold,
+    input  tri0                pause,
 
     input  logic               ss_restore_enable,
     input  logic               ss_restore_commit,
+    input  logic               ss_restore_bgm_valid,
+    input  logic [ 7:0]        ss_restore_bgm_command,
+    input  logic [ 7:0]        ss_restore_bgm_argument,
     input  logic [63:0]        ss_data,
     input  logic [31:0]        ss_addr,
     input  logic [ 7:0]        ss_select,
@@ -67,7 +71,7 @@ reg [5:0] opm_reset_count = 6'd0;
 always_ff @(posedge clk or posedge sound_chip_reset) begin
     if (sound_chip_reset)
         opm_reset_count <= 6'd0;
-    else if (!opm_reset_count[5] && opm_cen)
+    else if ((!pause || !sound_ready) && !opm_reset_count[5] && opm_cen)
         opm_reset_count <= opm_reset_count + 6'd1;
 end
 wire opm_reset = sound_chip_reset || !opm_reset_count[5];
@@ -83,7 +87,7 @@ always_ff @(posedge clk or posedge sound_chip_reset) begin
         oki_reset_timer <= 14'd0;
         oki_reset <= 1'b1;
         oki_ready <= 1'b0;
-    end else begin
+    end else if (!pause || !sound_ready) begin
         unique case (oki_reset_state)
         2'd0: begin
             oki_reset <= 1'b0;
@@ -116,8 +120,8 @@ end
 
 wire sound_ready = opm_ready && oki_ready && oki_rom_ok;
 reg v25_started = 1'b0;
-always_ff @(posedge clk or posedge reset) begin
-    if (reset)
+always_ff @(posedge clk or posedge sound_chip_reset) begin
+    if (sound_chip_reset)
         v25_started <= 1'b0;
     else if (!v25_enable || !v25_owner_reset_n)
         v25_started <= 1'b0;
@@ -125,7 +129,7 @@ always_ff @(posedge clk or posedge reset) begin
         v25_started <= 1'b1;
 end
 
-wire v25_reset_async = reset || !v25_enable || !v25_owner_reset_n ||
+wire v25_reset_async = sound_chip_reset || !v25_enable || !v25_owner_reset_n ||
                        !v25_started;
 reg [1:0] v25_reset_pipe = 2'b11;
 always_ff @(posedge clk or posedge v25_reset_async) begin
@@ -146,6 +150,25 @@ wire        v25_bus_mstb_n;
 wire        v25_bus_iostb_n;
 wire        v25_state_idle;
 
+localparam logic [2:0]
+    BGM_REPLAY_IDLE          = 3'd0,
+    BGM_REPLAY_WAIT_READY    = 3'd1,
+    BGM_REPLAY_WRITE_ARG     = 3'd2,
+    BGM_REPLAY_WRITE_COMMAND = 3'd3,
+    BGM_REPLAY_RELEASE       = 3'd4;
+
+logic [2:0] bgm_replay_state = BGM_REPLAY_IDLE;
+logic [7:0] bgm_replay_command = 8'd0;
+logic [7:0] bgm_replay_argument = 8'd0;
+wire bgm_replay_write_argument =
+    (bgm_replay_state == BGM_REPLAY_WRITE_ARG) && !pause;
+wire bgm_replay_write_command =
+    (bgm_replay_state == BGM_REPLAY_WRITE_COMMAND) && !pause;
+wire bgm_replay_hold_v25 =
+    (bgm_replay_state == BGM_REPLAY_WRITE_ARG) ||
+    (bgm_replay_state == BGM_REPLAY_WRITE_COMMAND) ||
+    (bgm_replay_state == BGM_REPLAY_RELEASE);
+
 wire v25_hold_boundary = state_hold && v25_state_idle;
 
 knuckle_bash_v25_cpu #(
@@ -154,7 +177,8 @@ knuckle_bash_v25_cpu #(
     .clk               ( clk                         ),
     .reset             ( !v25_reset_n                ),
     .reset_n           ( v25_reset_n                 ),
-    .clock_enable      ( v25_cen && !v25_hold_boundary ),
+    .clock_enable      ( v25_cen && !v25_hold_boundary && !pause &&
+                         !bgm_replay_hold_v25            ),
     .port0_in          ( ~dip_b                      ),
     .port1_in          ( ~region                     ),
     .portt_in          ( ~dip_a                      ),
@@ -170,8 +194,11 @@ knuckle_bash_v25_cpu #(
     .fault             ( debug_fault                 ),
     .debug_pc          ( debug_pc                    ),
     .state_idle        ( v25_state_idle              ),
-    .ss_restore_enable ( ss_restore_enable           ),
-    .ss_restore_commit ( ss_restore_commit           ),
+    // The FM/ADPCM devices are cold-restored as one coherent sound domain;
+    // restoring only the V25 architecture would resume it against unrelated
+    // chip phase. Durable BGM intent is replayed below after cold boot.
+    .ss_restore_enable ( 1'b0                        ),
+    .ss_restore_commit ( 1'b0                        ),
     .ss_data           ( ss_data                     ),
     .ss_addr           ( ss_addr                     ),
     .ss_select         ( ss_select                   ),
@@ -187,14 +214,50 @@ wire v25_write_active = v25_mem_active && !v25_bus_r_w && v25_bus_doe;
 reg  v25_write_active_d = 1'b0;
 wire v25_write_start = v25_write_active && !v25_write_active_d;
 wire v25_shared_cs = v25_bus_addr[19:11] == 9'd0;
+wire v25_mailbox_ready_write = v25_write_start && v25_shared_cs &&
+                               (v25_bus_addr[10:0] == 11'd0) &&
+                               (v25_bus_dout == 8'hff);
 // MAME maps 80000-87fff with mirror mask 78000. The mask mirrors the same
 // 32 KiB image across the complete A19-high half of the V25 address space;
 // it is not a second ROM window beginning at 78000.
 wire v25_rom_cs = v25_bus_addr[19];
 
-assign shared_addr = v25_bus_addr[10:0];
-assign shared_dout = v25_bus_dout;
-assign shared_we = v25_write_start && v25_shared_cs;
+always_ff @(posedge clk or posedge reset) begin
+    if (reset) begin
+        bgm_replay_state <= BGM_REPLAY_IDLE;
+        bgm_replay_command <= 8'd0;
+        bgm_replay_argument <= 8'd0;
+    end else if (ss_restore_commit) begin
+        bgm_replay_state <= ss_restore_bgm_valid ?
+                            BGM_REPLAY_WAIT_READY : BGM_REPLAY_IDLE;
+        bgm_replay_command <= ss_restore_bgm_command;
+        bgm_replay_argument <= ss_restore_bgm_argument;
+    end else if (!pause) begin
+        unique case (bgm_replay_state)
+            BGM_REPLAY_WAIT_READY:
+                if (v25_mailbox_ready_write)
+                    bgm_replay_state <= BGM_REPLAY_WRITE_ARG;
+            BGM_REPLAY_WRITE_ARG:
+                bgm_replay_state <= BGM_REPLAY_WRITE_COMMAND;
+            BGM_REPLAY_WRITE_COMMAND:
+                bgm_replay_state <= BGM_REPLAY_RELEASE;
+            BGM_REPLAY_RELEASE:
+                bgm_replay_state <= BGM_REPLAY_IDLE;
+            default:
+                bgm_replay_state <= BGM_REPLAY_IDLE;
+        endcase
+    end
+end
+
+assign shared_addr = bgm_replay_write_argument ? 11'd1 :
+                     bgm_replay_write_command ? 11'd0 :
+                     v25_bus_addr[10:0];
+assign shared_dout = bgm_replay_write_argument ? bgm_replay_argument :
+                     bgm_replay_write_command ? bgm_replay_command :
+                     v25_bus_dout;
+assign shared_we = bgm_replay_write_argument ||
+                   bgm_replay_write_command ||
+                   (v25_write_start && v25_shared_cs);
 assign v25_rom_addr = v25_bus_addr[14:0];
 
 wire [7:0] opm_dout;
@@ -262,7 +325,7 @@ always_ff @(posedge clk) begin
         debug_ym_data <= 8'h00;
         debug_oki_write <= 1'b0;
         debug_oki_data <= 8'h00;
-    end else begin
+    end else if (!pause) begin
         v25_write_active_d <= v25_write_active;
         debug_ym_write <= 1'b0;
         debug_oki_write <= 1'b0;
@@ -314,7 +377,7 @@ end
 knuckle_bash_opm u_ym2151 (
     .rst    ( opm_reset     ),
     .clk    ( clk           ),
-    .cen    ( opm_cen       ),
+    .cen    ( opm_cen && !pause && !state_held ),
     .cs_n   ( opm_bus_cs_n  ),
     .wr_n   ( opm_bus_wr_n  ),
     .a0     ( opm_bus_a0    ),
@@ -328,7 +391,7 @@ knuckle_bash_opm u_ym2151 (
 knuckle_bash_jt6295 #(.INTERPOL(0)) u_oki6295 (
     .rst      ( oki_reset     ),
     .clk      ( clk           ),
-    .cen      ( oki_cen       ),
+    .cen      ( oki_cen && !pause && !state_held ),
     .ss       ( 1'b1          ),
     .wrn      ( oki_wr_n      ),
     .din      ( oki_host_data ),

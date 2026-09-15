@@ -36,7 +36,17 @@ module knuckle_bash_gp9001_cpu (
     output logic [12:0]  vram_pointer,
     output logic [ 7:0]  scroll_select,
     output logic [127:0] scrolls,
-    output logic [ 7:0]  scroll_flip
+    output logic [ 7:0]  scroll_flip,
+
+    input  logic         ss_restore_enable,
+    input  logic [63:0]  ss_data,
+    input  logic [31:0]  ss_addr,
+    input  logic [ 7:0]  ss_select,
+    input  logic         ss_write,
+    input  logic         ss_read,
+    input  logic         ss_query,
+    output logic [63:0]  ss_data_out,
+    output logic         ss_ack
 );
 
 localparam logic [2:0] ST_IDLE       = 3'd0;
@@ -79,6 +89,11 @@ wire [12:0] cpu_vram_port_addr =
     vram_write_commit ? mapped_pointer : cpu_vram_addr;
 wire [ 1:0] vram_we = vram_write_commit ? req_be : 2'b00;
 wire [15:0] cpu_vram_q;
+wire ss_vram_selected = ss_select == 8'd5;
+wire ss_vram_access = ss_vram_selected && !ss_query && (ss_read || ss_write);
+wire ss_regs_selected = ss_select == 8'd6;
+wire ss_regs_access = ss_regs_selected && !ss_query && (ss_read || ss_write);
+logic [15:0] vram_port1_q;
 
 function automatic logic [15:0] merge_word(
     input logic [15:0] old_word,
@@ -125,11 +140,57 @@ jtframe_dual_ram16 #(.AW(13)) u_vram (
     .we0   ( vram_we            ),
     .q0    ( cpu_vram_q         ),
     .clk1  ( clk                ),
-    .data1 ( 16'h0000           ),
-    .addr1 ( mapped_scan_addr   ),
-    .we1   ( 2'b00              ),
-    .q1    ( scan_data          )
+    .data1 ( ss_vram_access ? ss_data[15:0] : 16'h0000 ),
+    .addr1 ( ss_vram_access ? ss_addr[12:0] : mapped_scan_addr ),
+    .we1   ( ss_vram_access ? {2{ss_write && ss_restore_enable}} : 2'b00 ),
+    .q1    ( vram_port1_q       )
 );
+
+assign scan_data = vram_port1_q;
+
+logic ss_vram_read_delay = 1'b0;
+always_ff @(posedge clk) begin
+    ss_ack <= 1'b0;
+    ss_data_out <= 64'd0;
+
+    if (ss_vram_selected && ss_query) begin
+        ss_data_out <= {8'd5, 22'd0, 2'd1, 32'd8192};
+        ss_ack <= 1'b1;
+        ss_vram_read_delay <= 1'b0;
+    end else if (ss_vram_access) begin
+        if (ss_write) begin
+            ss_ack <= 1'b1;
+            ss_vram_read_delay <= 1'b0;
+        end else begin
+            if (ss_vram_read_delay) begin
+                ss_data_out <= {48'd0, vram_port1_q};
+                ss_ack <= 1'b1;
+            end
+            ss_vram_read_delay <= 1'b1;
+        end
+    end else begin
+        ss_vram_read_delay <= 1'b0;
+    end
+
+    if (ss_regs_selected && ss_query) begin
+        ss_data_out <= {8'd6, 22'd0, 2'd3, 32'd3};
+        ss_ack <= 1'b1;
+    end else if (ss_regs_access) begin
+        if (ss_write) begin
+            ss_ack <= 1'b1;
+        end else begin
+            case (ss_addr[1:0])
+                2'd0: ss_data_out <= {34'd0, irq4, vram_pointer,
+                                      scroll_select, scroll_flip};
+                2'd1: ss_data_out <= {scroll_reg[3], scroll_reg[2],
+                                      scroll_reg[1], scroll_reg[0]};
+                default: ss_data_out <= {scroll_reg[7], scroll_reg[6],
+                                         scroll_reg[5], scroll_reg[4]};
+            endcase
+            ss_ack <= 1'b1;
+        end
+    end
+end
 
 integer i;
 always_ff @(posedge clk) begin
@@ -259,6 +320,29 @@ always_ff @(posedge clk) begin
                     state <= ST_IDLE;
                 end
             endcase
+
+            if (ss_regs_access && ss_write && ss_restore_enable) begin
+                case (ss_addr[1:0])
+                    2'd0: begin
+                        irq4          <= ss_data[29];
+                        vram_pointer  <= ss_data[28:16];
+                        scroll_select <= ss_data[15:8];
+                        scroll_flip   <= ss_data[7:0];
+                    end
+                    2'd1: begin
+                        scroll_reg[0] <= ss_data[15:0];
+                        scroll_reg[1] <= ss_data[31:16];
+                        scroll_reg[2] <= ss_data[47:32];
+                        scroll_reg[3] <= ss_data[63:48];
+                    end
+                    default: begin
+                        scroll_reg[4] <= ss_data[15:0];
+                        scroll_reg[5] <= ss_data[31:16];
+                        scroll_reg[6] <= ss_data[47:32];
+                        scroll_reg[7] <= ss_data[63:48];
+                    end
+                endcase
+            end
         end
     end
 end

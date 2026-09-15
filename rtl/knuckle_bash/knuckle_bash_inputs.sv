@@ -15,10 +15,10 @@ module knuckle_bash_inputs (
 
 function automatic logic [7:0] player_port(input logic [31:0] joy);
     begin
-        // MAME: unknown, B3, B2, B1, right, left, down, up.
+        // MAME bit 6 is physically unpopulated; B2 is Jump and B1 Attack.
         player_port = {
-            1'b0,
-            joy[6:4],
+            2'b00,
+            joy[5:4],
             joy[0],
             joy[1],
             joy[2],
@@ -30,7 +30,8 @@ endfunction
 assign player1 = player_port(joy1);
 assign player2 = player_port(joy2);
 
-// MiSTer BUTTONS=3 convention: start is joy[7], coin is joy[8].
+// Keep the unpopulated third-button slot so the established arcade layout
+// remains: start is joy[7], coin is joy[8], and pause is joy[9].
 // MAME: unknown, start2, start1, coin2, coin1, test, tilt, service1.
 assign system = {
     1'b0,

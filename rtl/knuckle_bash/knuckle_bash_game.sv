@@ -7,6 +7,7 @@ module knuckle_bash_game (
     input  logic [127:0] status,
     input  logic [ 31:0] joy1,
     input  logic [ 31:0] joy2,
+    input  logic        pause,
     input  logic        ioctl_download,
     input  logic        ioctl_wr,
     input  logic [26:0] ioctl_addr,
@@ -36,6 +37,18 @@ module knuckle_bash_game (
     input  logic        oki_rom_ok,
     input  logic        ss_save_req,
     input  logic        ss_load_req,
+    input  logic        ss_stream_busy,
+    input  logic        ss_format_valid,
+    input  logic [63:0] ss_data,
+    input  logic [31:0] ss_addr,
+    input  logic [ 7:0] ss_select,
+    input  logic        ss_write,
+    input  logic        ss_read,
+    input  logic        ss_query,
+    output logic [63:0] ss_data_out,
+    output logic        ss_ack,
+    output logic        ss_save_start,
+    output logic        ss_load_start,
     output logic        ss_active,
     output logic [ 7:0] red,
     output logic [ 7:0] green,
@@ -114,20 +127,7 @@ knuckle_bash_inputs u_inputs (
     .system   ( system_inputs   )
 );
 
-logic save_start;
-logic load_start;
 logic safe_boundary;
-
-knuckle_bash_savestate_controller u_ss_controller (
-    .clk           ( clk           ),
-    .rst           ( reset_game    ),
-    .safe_boundary ( safe_boundary ),
-    .save_req      ( ss_save_req   ),
-    .load_req      ( ss_load_req   ),
-    .save_start    ( save_start    ),
-    .load_start    ( load_start    ),
-    .active        ( ss_active     )
-);
 
 wire [63:0] ss_magic;
 wire [31:0] ss_schema;
@@ -173,7 +173,7 @@ always_ff @(posedge clk) begin
     end
 end
 
-assign safe_boundary = pxl_cen && hcnt == 9'd0 && vcnt == 9'd240;
+wire state_boundary_tick = pxl_cen && hcnt == 9'd0 && vcnt == 9'd240;
 
 wire visible = hcnt < 9'd320 && vcnt < 9'd240;
 wire hsync_n = !(hcnt >= 9'd336 && hcnt < 9'd368);
@@ -273,6 +273,45 @@ logic        main_state_idle;
 logic        main_state_held;
 logic        main_ready;
 logic        main_reset;
+logic        main_cpu_ack;
+logic        main_cpu_iack;
+logic        main_cpu_rw;
+logic        main_cpu_uds_n;
+logic        main_cpu_lds_n;
+logic [ 2:0] main_cpu_fc;
+logic [23:0] main_cpu_addr;
+logic [15:0] main_cpu_dout;
+logic        ss_irq;
+logic        ss_override;
+logic        ss_cpu_reset;
+logic        ss_cpu_run;
+logic        ss_device_hold;
+logic        ss_video_reset;
+logic        ss_restore_commit;
+logic        ss_restore_compatible;
+logic [31:0] ss_saved_ssp;
+logic [31:0] ss_restore_ssp;
+logic [63:0] ss_reset_vector;
+logic [63:0] ss_restore_rom_signature;
+logic [63:0] ss_global_data_out;
+logic        ss_global_ack;
+logic [63:0] ss_main_data_out;
+logic        ss_main_ack;
+logic [63:0] ss_shared_data_out;
+logic        ss_shared_ack;
+logic [63:0] ss_gp_data_out;
+logic        ss_gp_ack;
+logic [ 7:0] coin_control;
+logic        v25_owner_reset_n_live;
+logic        v25_owner_reset_n_saved;
+logic        ss_restore_v25_owner;
+logic [ 7:0] sound_bgm_pending_argument;
+logic [ 7:0] sound_bgm_command;
+logic [ 7:0] sound_bgm_argument;
+logic        sound_bgm_valid;
+logic [ 7:0] ss_restore_bgm_command;
+logic [ 7:0] ss_restore_bgm_argument;
+logic        ss_restore_bgm_valid;
 wire         sound_sample;
 wire         sound_state_idle;
 wire         sound_state_held;
@@ -285,18 +324,170 @@ wire [ 7:0]  sound_debug_ym_data;
 wire         sound_debug_oki_write;
 wire [ 7:0]  sound_debug_oki_data;
 
+always_comb begin
+    ss_ack = ss_global_ack || ss_main_ack || ss_shared_ack || ss_gp_ack;
+    if (ss_global_ack)
+        ss_data_out = ss_global_data_out;
+    else if (ss_main_ack)
+        ss_data_out = ss_main_data_out;
+    else if (ss_shared_ack)
+        ss_data_out = ss_shared_data_out;
+    else if (ss_gp_ack)
+        ss_data_out = ss_gp_data_out;
+    else
+        ss_data_out = 64'd0;
+end
+
+// Chunk 1 is deliberately ahead of every mutable RAM chunk. A restore does
+// not enable any write port until both the top-level schema and this loaded
+// ROM identity have matched the running set.
+always_ff @(posedge clk) begin
+    ss_global_ack <= 1'b0;
+    if (main_reset || ss_load_start) begin
+        ss_restore_ssp <= 32'd0;
+        ss_restore_rom_signature <= 64'd0;
+        ss_restore_compatible <= 1'b0;
+        ss_restore_bgm_command <= 8'd0;
+        ss_restore_bgm_argument <= 8'd0;
+        ss_restore_bgm_valid <= 1'b0;
+        ss_restore_v25_owner <= 1'b0;
+    end else if (ss_select == 8'd1) begin
+        if (ss_query) begin
+            ss_global_data_out <= {8'd1, 22'd0, 2'd3, 32'd2};
+            ss_global_ack <= 1'b1;
+        end else if (ss_read) begin
+            if (ss_addr[0])
+                ss_global_data_out <= rom_crc64;
+            else
+                ss_global_data_out <= {
+                    14'd0, sound_bgm_valid, sound_bgm_argument,
+                    sound_bgm_command, v25_owner_reset_n_saved, ss_saved_ssp
+                };
+            ss_global_ack <= 1'b1;
+        end else if (ss_write) begin
+            if (ss_addr[0]) begin
+                ss_restore_rom_signature <= ss_data;
+                ss_restore_compatible <=
+                    ss_format_valid && (ss_data == rom_crc64);
+            end else begin
+                ss_restore_ssp <= ss_data[31:0];
+                ss_restore_v25_owner <= ss_data[32];
+                ss_restore_bgm_command <= ss_data[40:33];
+                ss_restore_bgm_argument <= ss_data[48:41];
+                ss_restore_bgm_valid <= ss_data[49];
+            end
+            ss_global_ack <= 1'b1;
+        end
+    end
+end
+
+// Preserve the 68000-owned sound reset line across the temporary CPU reset
+// used for architectural restore.
+always_ff @(posedge clk) begin
+    if (main_reset)
+        v25_owner_reset_n_saved <= 1'b0;
+    else if (ss_restore_commit)
+        v25_owner_reset_n_saved <= ss_restore_v25_owner;
+    else if (!ss_active)
+        v25_owner_reset_n_saved <= v25_owner_reset_n_live;
+end
+
+// Knuckle Bash uses shared byte 1 as the command argument and byte 0 as the
+// command/ack. Captured gameplay traffic matches Batsugun: argument 00 is
+// durable BGM intent, while command 00 with argument 01 stops the music.
+always_ff @(posedge clk) begin
+    if (main_reset) begin
+        sound_bgm_pending_argument <= 8'd0;
+        sound_bgm_command <= 8'd0;
+        sound_bgm_argument <= 8'd0;
+        sound_bgm_valid <= 1'b0;
+    end else if (ss_restore_commit) begin
+        sound_bgm_pending_argument <= ss_restore_bgm_argument;
+        sound_bgm_command <= ss_restore_bgm_command;
+        sound_bgm_argument <= ss_restore_bgm_argument;
+        sound_bgm_valid <= ss_restore_bgm_valid;
+    end else if (shared_main_we) begin
+        if (shared_main_addr == 11'd1) begin
+            sound_bgm_pending_argument <= shared_main_din;
+        end else if (shared_main_addr == 11'd0 && shared_main_din != 8'hff) begin
+            if (shared_main_din == 8'h00 &&
+                sound_bgm_pending_argument == 8'h01) begin
+                sound_bgm_valid <= 1'b0;
+            end else if (sound_bgm_pending_argument == 8'h00) begin
+                sound_bgm_command <= shared_main_din;
+                sound_bgm_argument <= sound_bgm_pending_argument;
+                sound_bgm_valid <= 1'b1;
+            end
+        end
+    end
+end
+
 assign main_ready = rom_valid && sdram_ready &&
                     !reset_game && !ioctl_download;
 assign main_reset = reset_game || !rom_valid || !sdram_ready;
-wire main_run = main_ready && video_snapshot_main_run;
-wire video_renderer_reset = main_reset || video_snapshot_boundary;
+logic ss_main_hold_latched = 1'b0;
+wire ss_main_hold = !ss_cpu_run &&
+                    (ss_main_hold_latched || main_state_idle);
+wire main_run = main_ready && video_snapshot_main_run && !pause &&
+                !ss_main_hold;
+wire video_renderer_reset = main_reset || video_snapshot_boundary || ss_video_reset;
+
+// A state request may arrive in the middle of an acknowledged 68000 cycle.
+// Let that cycle drain, then prevent the next one from starting. This keeps
+// the private IRQ handler parked immediately after its SSP mailbox write and
+// gives restore the same clean between-transactions acquisition point.
+always_ff @(posedge clk) begin
+    if (main_reset || ss_cpu_run)
+        ss_main_hold_latched <= 1'b0;
+    else if (main_state_idle)
+        ss_main_hold_latched <= 1'b1;
+end
 
 wire gp_vint_set =
-    pxl_cen && hcnt == 9'd0 && vcnt == 9'd230;
+    !pause && !ss_active && pxl_cen && hcnt == 9'd0 && vcnt == 9'd230;
+
+// Acquire the machine at the start of vertical blank, then let each domain
+// drain to its own idle boundary in the controller's WAIT_HOLD phase. Requiring
+// every independently clock-enabled domain to be idle on this single raster
+// tick makes a legitimate request probabilistic and can starve it forever.
+assign safe_boundary = state_boundary_tick;
+
+knuckle_bash_savestate_controller u_ss_controller (
+    .clk                ( clk                       ),
+    .rst                ( main_reset                ),
+    .safe_boundary      ( safe_boundary             ),
+    .video_ready        ( video_snapshot_ready      ),
+    .main_held          ( main_state_held            ),
+    .sound_held         ( sound_state_held           ),
+    .save_req           ( ss_save_req               ),
+    .load_req           ( ss_load_req               ),
+    .stream_busy        ( ss_stream_busy            ),
+    .restore_compatible ( ss_restore_compatible     ),
+    .restore_ssp        ( ss_restore_ssp            ),
+    .cpu_ack            ( main_cpu_ack              ),
+    .cpu_iack           ( main_cpu_iack             ),
+    .cpu_rw             ( main_cpu_rw               ),
+    .cpu_lds_n          ( main_cpu_lds_n            ),
+    .cpu_fc             ( main_cpu_fc               ),
+    .cpu_addr           ( main_cpu_addr             ),
+    .cpu_dout           ( main_cpu_dout             ),
+    .save_start         ( ss_save_start             ),
+    .load_start         ( ss_load_start             ),
+    .active             ( ss_active                 ),
+    .ss_irq             ( ss_irq                    ),
+    .ss_override        ( ss_override               ),
+    .ss_reset           ( ss_cpu_reset              ),
+    .cpu_run            ( ss_cpu_run                ),
+    .device_hold        ( ss_device_hold            ),
+    .video_reset        ( ss_video_reset            ),
+    .restore_commit     ( ss_restore_commit         ),
+    .saved_ssp          ( ss_saved_ssp              ),
+    .reset_vector       ( ss_reset_vector           )
+);
 
 knuckle_bash_snapshot_control u_snapshot_control (
     .clk               ( clk                         ),
-    .rst               ( main_reset                  ),
+    .rst               ( main_reset || ss_video_reset ),
     .snapshot_prepare  ( video_snapshot_prepare      ),
     .snapshot_boundary ( video_snapshot_boundary     ),
     .main_idle         ( main_state_idle             ),
@@ -333,12 +524,21 @@ knuckle_bash_gp9001_cpu u_gp9001_cpu (
     .vram_pointer  (              ),
     .scroll_select (              ),
     .scrolls       ( gp_live_scrolls ),
-    .scroll_flip   ( gp_live_scroll_flip )
+    .scroll_flip   ( gp_live_scroll_flip ),
+    .ss_restore_enable( ss_restore_compatible ),
+    .ss_data       ( ss_data          ),
+    .ss_addr       ( ss_addr          ),
+    .ss_select     ( ss_select        ),
+    .ss_write      ( ss_write         ),
+    .ss_read       ( ss_read          ),
+    .ss_query      ( ss_query         ),
+    .ss_data_out   ( ss_gp_data_out   ),
+    .ss_ack        ( ss_gp_ack        )
 );
 
 knuckle_bash_gp9001_snapshot u_gp9001_snapshot (
     .clk                 ( clk                 ),
-    .rst                 ( main_reset          ),
+    .rst                 ( main_reset || ss_video_reset ),
     .snapshot_start      ( video_snapshot_start),
     .source_addr         ( gp_snapshot_addr    ),
     .source_data         ( gp_snapshot_data    ),
@@ -357,7 +557,7 @@ knuckle_bash_gp9001_snapshot u_gp9001_snapshot (
 
 knuckle_bash_palette_snapshot u_palette_snapshot (
     .clk            ( clk                      ),
-    .rst            ( main_reset               ),
+    .rst            ( main_reset || ss_video_reset ),
     .snapshot_start ( video_snapshot_start     ),
     .source_addr    ( palette_snapshot_addr    ),
     .source_data    ( palette_snapshot_data    ),
@@ -412,7 +612,19 @@ knuckle_bash_main u_main (
     .run                      ( main_run                 ),
     .txn_flush                ( !main_ready              ),
     .irq4                     ( gp_irq4                  ),
-    .ss_irq                   ( 1'b0                     ),
+    .ss_irq                   ( ss_irq                   ),
+    .ss_override              ( ss_override              ),
+    .ss_reset                 ( ss_cpu_reset              ),
+    .ss_reset_vector          ( ss_reset_vector           ),
+    .ss_restore_enable        ( ss_restore_compatible     ),
+    .ss_data                  ( ss_data                   ),
+    .ss_addr                  ( ss_addr                   ),
+    .ss_select                ( ss_select                 ),
+    .ss_write                 ( ss_write                  ),
+    .ss_read                  ( ss_read                   ),
+    .ss_query                 ( ss_query                  ),
+    .ss_data_out              ( ss_main_data_out          ),
+    .ss_ack                   ( ss_main_ack               ),
     .hs_reset                 ( reset_cold || (ioctl_download && ioctl_index == 16'd0) ),
     .hs_set_id                ( rom_set_id               ),
     .hs_download              ( hs_download              ),
@@ -450,23 +662,23 @@ knuckle_bash_main u_main (
     .shared_din               ( shared_main_din          ),
     .shared_we                ( shared_main_we           ),
     .shared_dout              ( shared_main_dout         ),
-    .coin_control             (                          ),
-    .v25_owner_reset_n        ( v25_owner_reset_n        ),
+    .coin_control             ( coin_control             ),
+    .v25_owner_reset_n        ( v25_owner_reset_n_live   ),
     .state_idle               ( main_state_idle          ),
     .state_held               ( main_state_held          ),
     .debug_cpu_cen            (                          ),
     .debug_cpu_cenb           (                          ),
     .debug_cpu_dtack_n        (                          ),
     .debug_cpu_bus_active     (                          ),
-    .debug_cpu_ack_now        (                          ),
-    .debug_cpu_iack           (                          ),
-    .debug_cpu_rw             (                          ),
+    .debug_cpu_ack_now        ( main_cpu_ack             ),
+    .debug_cpu_iack           ( main_cpu_iack            ),
+    .debug_cpu_rw             ( main_cpu_rw              ),
     .debug_cpu_as_n           (                          ),
-    .debug_cpu_uds_n          (                          ),
-    .debug_cpu_lds_n          (                          ),
-    .debug_cpu_fc             (                          ),
-    .debug_cpu_addr           (                          ),
-    .debug_cpu_dout           (                          ),
+    .debug_cpu_uds_n          ( main_cpu_uds_n           ),
+    .debug_cpu_lds_n          ( main_cpu_lds_n           ),
+    .debug_cpu_fc             ( main_cpu_fc              ),
+    .debug_cpu_addr           ( main_cpu_addr            ),
+    .debug_cpu_dout           ( main_cpu_dout            ),
     .debug_cpu_din            (                          ),
     .debug_ack_count          (                          ),
     .debug_unmapped_ack_count (                          )
@@ -492,7 +704,16 @@ knuckle_bash_shared_ram u_shared_ram (
     .sound_addr ( shared_sound_addr ),
     .sound_din  ( shared_sound_dout ),
     .sound_we   ( shared_sound_we   ),
-    .sound_dout ( shared_sound_din  )
+    .sound_dout ( shared_sound_din  ),
+    .ss_restore_enable( ss_restore_compatible ),
+    .ss_data    ( ss_data           ),
+    .ss_addr    ( ss_addr           ),
+    .ss_select  ( ss_select         ),
+    .ss_write   ( ss_write          ),
+    .ss_read    ( ss_read           ),
+    .ss_query   ( ss_query          ),
+    .ss_data_out( ss_shared_data_out),
+    .ss_ack     ( ss_shared_ack     )
 );
 
 knuckle_bash_sound u_sound (
@@ -502,16 +723,20 @@ knuckle_bash_sound u_sound (
     .opm_cen           ( opm_cen              ),
     .oki_cen           ( oki_cen              ),
     .v25_enable        ( main_ready            ),
-    .v25_owner_reset_n ( v25_owner_reset_n     ),
+    .v25_owner_reset_n ( v25_owner_reset_n_saved ),
     .dip_a             ( dipsw[ 7: 0]         ),
     .dip_b             ( dipsw[15: 8]         ),
     .region            ( dipsw[23:16]         ),
     .fm_enable         ( !status[9]           ),
     .fx_enable         ( !status[8]           ),
     .fx_level          ( 2'b10 ^ status[7:6]  ),
-    .state_hold        ( ss_active            ),
-    .ss_restore_enable ( 1'b0                 ),
-    .ss_restore_commit ( load_start           ),
+    .state_hold        ( ss_device_hold       ),
+    .pause             ( pause                ),
+    .ss_restore_enable ( ss_restore_compatible),
+    .ss_restore_commit ( ss_restore_commit    ),
+    .ss_restore_bgm_valid( ss_restore_bgm_valid ),
+    .ss_restore_bgm_command( ss_restore_bgm_command ),
+    .ss_restore_bgm_argument( ss_restore_bgm_argument ),
     .ss_data           ( 64'd0                ),
     .ss_addr           ( 32'd0                ),
     .ss_select         ( 8'd0                 ),
@@ -544,18 +769,21 @@ knuckle_bash_sound u_sound (
     .debug_oki_data    ( sound_debug_oki_data )
 );
 
-// True renderer failures are sticky until the gameplay reset. Object-capacity
+// True renderer failures are sticky until the gameplay reset. A pause may
+// intentionally interrupt an in-flight snapshot acquisition, so its transient
+// ownership/deadline flags are not renderer failures. Object-capacity
 // saturation is recoverable bounded rendering with its own telemetry; it must
 // not turn legitimate boot diagnostics into a permanent magenta output.
 always_ff @(posedge clk or posedge main_reset) begin
     if (main_reset) begin
         video_renderer_fault <= 1'b0;
-    end else if (video_snapshot_control_miss ||
-                 gp_snapshot_miss ||
-                 palette_snapshot_miss ||
-                 (|video_deadline_miss) ||
-                 (video_snapshot_hold &&
-                  (main_run || !main_state_held))) begin
+    end else if (!pause && !ss_active &&
+                 (video_snapshot_control_miss ||
+                  gp_snapshot_miss ||
+                  palette_snapshot_miss ||
+                  (|video_deadline_miss) ||
+                  (video_snapshot_hold &&
+                   (main_run || !main_state_held)))) begin
         video_renderer_fault <= 1'b1;
     end
 end
@@ -584,10 +812,6 @@ always_ff @(posedge clk) begin
             red <= {hcnt[4:0], 3'b000};
             green <= {vcnt[4:0], 3'b000};
             blue <= 8'h30;
-        end else if (ss_active) begin
-            red <= 8'hff;
-            green <= 8'hff;
-            blue <= 8'h00;
         end else if (video_renderer_fault) begin
             red <= 8'hff;
             green <= 8'h00;

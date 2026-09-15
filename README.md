@@ -14,6 +14,23 @@ MAME models Knuckle Bash as:
 - OKIM6295 at 1 MHz, pin 7 high.
 - Raster timing: 27 MHz / 4 pixel clock, 432 total horizontal clocks, 320 visible pixels, 262 total lines, 240 visible lines; native horizontal orientation, approximately 59.6374 Hz.
 
+## Controls
+
+| MiSTer control | Function |
+| --- | --- |
+| A | Attack |
+| B | Jump |
+| Start | Start |
+| Select | Coin |
+| R | Pause |
+| L | Save States |
+
+Pause freezes the complete emulated machine, including both sound chips, while
+the video output remains synchronized. Press Pause again to resume.
+
+Save-state controls follow the MiSTer IGS PGM convention. Hold **L**, then use
+Left or Right to select a slot, Down to save, or Up to load.
+
 ## Source Notes
 
 - MiSTer framework and top-level structure:

@@ -10,6 +10,6 @@ module knuckle_bash_savestate_schema (
 assign magic = 64'h4B42_5353_3030_3031; // "KBSS0001"
 assign schema_version = 32'd1;
 assign board_id = 48'h5450_2D30_3233; // "TP-023"
-assign chunk_count = 16'd9;
+assign chunk_count = 16'd7;
 
 endmodule

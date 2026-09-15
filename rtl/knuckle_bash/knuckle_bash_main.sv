@@ -9,6 +9,19 @@ module knuckle_bash_main (
     input  logic        txn_flush,
     input  logic        irq4,
     input  logic        ss_irq,
+    input  logic        ss_override,
+    input  logic        ss_reset,
+    input  logic [63:0] ss_reset_vector,
+
+    input  logic        ss_restore_enable,
+    input  logic [63:0] ss_data,
+    input  logic [31:0] ss_addr,
+    input  logic [ 7:0] ss_select,
+    input  logic        ss_write,
+    input  logic        ss_read,
+    input  logic        ss_query,
+    output logic [63:0] ss_data_out,
+    output logic        ss_ack,
 
     input  logic        hs_reset, hs_download, hs_upload, hs_wr, hs_rd, hs_ss_active,
     input  logic [1:0]  hs_set_id,
@@ -94,6 +107,51 @@ reg hs_hold_latched = 0;
 // acquisition edge, just like the existing video-snapshot controller.
 wire hs_pause = hs_hold_request && (hs_hold_latched || state_idle);
 wire cpu_run = run && !hs_pause;
+
+function automatic logic [15:0] ss_irq_handler_word(input logic [3:0] index);
+    case (index)
+        4'h0: ss_irq_handler_word = 16'h48e7; // movem.l d0-d7/a0-a6,-(sp)
+        4'h1: ss_irq_handler_word = 16'hfffe;
+        4'h2: ss_irq_handler_word = 16'h4e6e; // move usp,a6
+        4'h3: ss_irq_handler_word = 16'h2f0e; // move.l a6,-(sp)
+        4'h4: ss_irq_handler_word = 16'h4df9; // lea ff0000,a6
+        4'h5: ss_irq_handler_word = 16'h00ff;
+        4'h6: ss_irq_handler_word = 16'h0000;
+        4'h7: ss_irq_handler_word = 16'h2c8f; // move.l sp,(a6)
+        4'h8: ss_irq_handler_word = 16'h2c5f; // move.l (sp)+,a6
+        4'h9: ss_irq_handler_word = 16'h4e66; // move a6,usp
+        4'ha: ss_irq_handler_word = 16'h4cdf; // movem.l (sp)+,d0-d7/a0-a6
+        4'hb: ss_irq_handler_word = 16'h7fff;
+        4'hc: ss_irq_handler_word = 16'h4e73; // rte
+        default: ss_irq_handler_word = 16'h0000;
+    endcase
+endfunction
+
+wire ss_handler_cs = ss_override && debug_cpu_bus_active &&
+                     (debug_cpu_addr[23:8] == 16'hff00);
+wire ss_reset_vector_cs = ss_override && debug_cpu_bus_active &&
+                          (debug_cpu_addr < 24'h000008);
+wire ss_irq_vector_cs = ss_override && debug_cpu_bus_active &&
+                        ((debug_cpu_addr == 24'h00007c) ||
+                         (debug_cpu_addr == 24'h00007e));
+logic [15:0] ss_special_din;
+
+always_comb begin
+    ss_special_din = 16'hffff;
+    if (ss_handler_cs)
+        ss_special_din = ss_irq_handler_word(debug_cpu_addr[4:1]);
+    else if (ss_reset_vector_cs)
+        case (debug_cpu_addr[2:1])
+            2'd0: ss_special_din = ss_reset_vector[63:48];
+            2'd1: ss_special_din = ss_reset_vector[47:32];
+            2'd2: ss_special_din = ss_reset_vector[31:16];
+            default: ss_special_din = ss_reset_vector[15:0];
+        endcase
+    else if (ss_irq_vector_cs)
+        // IRQ7 enters at ff0000 to stack the complete architectural frame.
+        // Only the restore reset vector enters at ff0008 to pop that frame.
+        ss_special_din = debug_cpu_addr[1] ? 16'h0000 : 16'h00ff;
+end
 always @(posedge clk) begin
     if (reset || !hs_hold_request) hs_hold_latched <= 0;
     else if (state_idle) hs_hold_latched <= 1;
@@ -101,7 +159,7 @@ end
 
 knuckle_bash_main_cpu u_main_cpu (
     .clk               ( clk                  ),
-    .reset             ( reset                ),
+    .reset             ( reset || ss_reset    ),
     .run               ( cpu_run              ),
     .irq4              ( irq4                 ),
     .ss_irq            ( ss_irq               ),
@@ -130,7 +188,8 @@ always_ff @(posedge clk) begin
     if (reset || txn_flush)
         cpu_din <= 16'hffff;
     else if (debug_cpu_bus_active && debug_cpu_rw)
-        cpu_din <= bus_din;
+        cpu_din <= (ss_handler_cs || ss_reset_vector_cs || ss_irq_vector_cs) ?
+                   ss_special_din : bus_din;
 end
 
 assign debug_cpu_din = cpu_din;
@@ -155,6 +214,15 @@ knuckle_bash_main_bus u_main_bus (
     .hs_active          ( hs_active                ),
     .hs_hold_request    ( hs_hold_request          ),
     .hs_hold_ack        ( hs_pause && state_idle   ),
+    .ss_restore_enable  ( ss_restore_enable        ),
+    .ss_data            ( ss_data                  ),
+    .ss_addr            ( ss_addr                  ),
+    .ss_select          ( ss_select                ),
+    .ss_write           ( ss_write                 ),
+    .ss_read            ( ss_read                  ),
+    .ss_query           ( ss_query                 ),
+    .ss_data_out        ( ss_data_out              ),
+    .ss_ack             ( ss_ack                   ),
     .bus_active         ( debug_cpu_bus_active     ),
     .rw                 ( debug_cpu_rw             ),
     .uds_n              ( debug_cpu_uds_n          ),

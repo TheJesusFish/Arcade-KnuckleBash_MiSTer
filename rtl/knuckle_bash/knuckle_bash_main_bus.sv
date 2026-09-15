@@ -17,6 +17,16 @@ module knuckle_bash_main_bus (
     output logic        hs_wait, hs_dirty, hs_active, hs_hold_request,
     input  logic        hs_hold_ack,
 
+    input  logic        ss_restore_enable,
+    input  logic [63:0] ss_data,
+    input  logic [31:0] ss_addr,
+    input  logic [ 7:0] ss_select,
+    input  logic        ss_write,
+    input  logic        ss_read,
+    input  logic        ss_query,
+    output logic [63:0] ss_data_out,
+    output logic        ss_ack,
+
     input  logic        bus_active,
     input  logic        rw,
     input  logic        uds_n,
@@ -145,6 +155,7 @@ logic [15:0] gp_latched_data;
 logic [15:0] wram [0:8191];
 logic [15:0] wram_q;
 logic [15:0] palette_q;
+logic [15:0] palette_port1_q;
 logic [ 1:0] wram_we;
 logic [ 1:0] palette_we;
 logic        commit_now;
@@ -153,9 +164,18 @@ wire hs_ram_owned;
 wire [12:0] hs_ram_addr;
 wire [1:0] hs_ram_we;
 wire [15:0] hs_ram_data;
-wire [12:0] work_address = hs_ram_owned ? hs_ram_addr : decoded_wram_addr;
-wire [1:0] work_we = hs_ram_owned ? hs_ram_we : wram_we;
-wire [15:0] work_data = hs_ram_owned ? hs_ram_data : cpu_dout;
+wire ss_wram_selected = ss_select == 8'd2;
+wire ss_wram_access = ss_wram_selected && !ss_query && (ss_read || ss_write);
+wire ss_palette_selected = ss_select == 8'd4;
+wire ss_palette_access = ss_palette_selected && !ss_query &&
+                         (ss_read || ss_write);
+wire [12:0] work_address = ss_wram_access ? ss_addr[12:0] :
+                           hs_ram_owned ? hs_ram_addr : decoded_wram_addr;
+wire [1:0] work_we = ss_wram_access ?
+                     {2{ss_write && ss_restore_enable}} :
+                     hs_ram_owned ? hs_ram_we : wram_we;
+wire [15:0] work_data = ss_wram_access ? ss_data[15:0] :
+                        hs_ram_owned ? hs_ram_data : cpu_dout;
 knuckle_bash_highscore u_highscore (
     .clk(clk), .reset(hs_reset), .cpu_reset(rst), .set_id(hs_set_id),
     .config_download(hs_download && hs_index[5:0] == 6'd4),
@@ -229,11 +249,59 @@ jtframe_dual_ram16 #(.AW(11)) u_palette (
     .we0   ( palette_we           ),
     .q0    ( palette_q            ),
     .clk1  ( clk                  ),
-    .data1 ( 16'h0000             ),
-    .addr1 ( palette_scan_addr    ),
-    .we1   ( 2'b00                ),
-    .q1    ( palette_scan_data    )
+    .data1 ( ss_palette_access ? ss_data[15:0] : 16'h0000 ),
+    .addr1 ( ss_palette_access ? ss_addr[10:0] : palette_scan_addr ),
+    .we1   ( ss_palette_access ? {2{ss_write && ss_restore_enable}} : 2'b00 ),
+    .q1    ( palette_port1_q      )
 );
+
+assign palette_scan_data = palette_port1_q;
+
+logic ss_wram_read_delay = 1'b0;
+logic ss_palette_read_delay = 1'b0;
+
+always_ff @(posedge clk) begin
+    ss_ack <= 1'b0;
+    ss_data_out <= 64'd0;
+
+    if (ss_wram_selected && ss_query) begin
+        ss_data_out <= {8'd2, 22'd0, 2'd1, 32'd8192};
+        ss_ack <= 1'b1;
+        ss_wram_read_delay <= 1'b0;
+    end else if (ss_wram_access) begin
+        if (ss_write) begin
+            ss_ack <= 1'b1;
+            ss_wram_read_delay <= 1'b0;
+        end else begin
+            if (ss_wram_read_delay) begin
+                ss_data_out <= {48'd0, wram_q};
+                ss_ack <= 1'b1;
+            end
+            ss_wram_read_delay <= 1'b1;
+        end
+    end else begin
+        ss_wram_read_delay <= 1'b0;
+    end
+
+    if (ss_palette_selected && ss_query) begin
+        ss_data_out <= {8'd4, 22'd0, 2'd1, 32'd2048};
+        ss_ack <= 1'b1;
+        ss_palette_read_delay <= 1'b0;
+    end else if (ss_palette_access) begin
+        if (ss_write) begin
+            ss_ack <= 1'b1;
+            ss_palette_read_delay <= 1'b0;
+        end else begin
+            if (ss_palette_read_delay) begin
+                ss_data_out <= {48'd0, palette_port1_q};
+                ss_ack <= 1'b1;
+            end
+            ss_palette_read_delay <= 1'b1;
+        end
+    end else begin
+        ss_palette_read_delay <= 1'b0;
+    end
+end
 
 always_comb begin
     cpu_din = 16'hffff;

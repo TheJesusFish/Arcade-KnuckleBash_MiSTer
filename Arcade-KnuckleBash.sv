@@ -94,10 +94,7 @@ wire        ss_load;
 wire        ss_info_req;
 wire [ 7:0] ss_info;
 wire        ss_status_set;
-// The schema/controller reservation is not yet a state transport. Keep the
-// user-facing save/load controls disabled until every live client can quiesce
-// and serialize transactionally.
-wire        savestate_ready = 1'b0;
+wire        savestate_ready;
 wire [15:0] status_menumask;
 wire [127:0] status_in = {status[127:66], ss_slot, status[63:0]};
 
@@ -295,7 +292,68 @@ knuckle_bash_sdram u_sdram_mem (
     .SDRAM_CKE             ( SDRAM_CKE                   )
 );
 
-wire [31:0] ss_joystick = joyusb_1_full | joyusb_2_full;
+wire [31:0] control_joystick =
+    joyusb_1_full | joyusb_2_full | joyusb_3_full |
+    joyusb_4_full | joyusb_5_full | joyusb_6_full;
+wire [31:0] ss_joystick = control_joystick;
+
+wire ss_stream_save;
+wire ss_stream_load;
+wire ss_busy;
+wire ss_format_valid;
+wire ss_active;
+
+ddr_if ddr_host();
+ddr_if ddr_ss();
+ddr_if ddr_video();
+ssbus_if ssbus();
+ssbus_if ssb[2]();
+
+ssbus_mux #(.COUNT(2)) u_ssbus_mux (
+    .clk     ( clk_rom ),
+    .slave   ( ssbus   ),
+    .masters ( ssb     )
+);
+
+save_state_data u_save_state_data (
+    .clk         ( clk_rom       ),
+    .reset       ( game_reset    ),
+    .ddr         ( ddr_ss        ),
+    .read_start  ( ss_stream_load),
+    .write_start ( ss_stream_save),
+    .index       ( ss_slot       ),
+    .busy        ( ss_busy       ),
+    .ssbus       ( ssbus         )
+);
+
+localparam [63:0] SS_MAGIC   = 64'h4b42_5353_3030_3031; // "KBSS0001"
+localparam [63:0] SS_VERSION = 64'h0001_5450_2d30_3233; // v1 + "TP-023"
+logic [63:0] ss_restored_magic = 64'd0;
+logic [63:0] ss_restored_version = 64'd0;
+assign ss_format_valid = (ss_restored_magic == SS_MAGIC) &&
+                         (ss_restored_version == SS_VERSION);
+
+always_ff @(posedge clk_rom) begin
+    ssb[0].setup(0, 2, 3);
+    if (game_reset || ss_stream_load) begin
+        ss_restored_magic <= 64'd0;
+        ss_restored_version <= 64'd0;
+    end
+    if (ssb[0].access(0)) begin
+        if (ssb[0].read) begin
+            ssb[0].read_response(0, ssb[0].addr[0] ? SS_VERSION : SS_MAGIC);
+        end else if (ssb[0].write) begin
+            if (ssb[0].addr[0])
+                ss_restored_version <= ssb[0].data;
+            else
+                ss_restored_magic <= ssb[0].data;
+            ssb[0].write_ack(0);
+        end
+    end
+end
+
+assign savestate_ready = game_rom_valid && sdram_runtime_ready &&
+                         !game_reset && !rom_download && !ss_active;
 
 savestate_ui #(.INFO_TIMEOUT_BITS(25)) u_savestate_ui (
     .clk            ( clk_rom          ),
@@ -323,8 +381,25 @@ savestate_ui #(.INFO_TIMEOUT_BITS(25)) u_savestate_ui (
 wire [7:0] game_r, game_g, game_b;
 wire       game_hs, game_vs, game_de, game_pxl_cen;
 wire       game_hblank, game_vblank;
-wire       ss_active;
 wire signed [15:0] game_audio_l, game_audio_r;
+wire       system_pause;
+wire [7:0] pause_r, pause_g, pause_b;
+
+knuckle_bash_pause #(.CLKSPD(94)) u_pause (
+    .clk_sys       ( clk_sys              ),
+    .reset         ( game_reset           ),
+    .user_button   ( control_joystick[9]  ),
+    .pause_request ( 1'b0                 ),
+    .options       ( 2'b10                ),
+    .osd_status    ( OSD_STATUS           ),
+    .r             ( game_r               ),
+    .g             ( game_g               ),
+    .b             ( game_b               ),
+    .pause_cpu     ( system_pause         ),
+    .r_out         ( pause_r              ),
+    .g_out         ( pause_g              ),
+    .b_out         ( pause_b              )
+);
 
 knuckle_bash_game u_game (
     .clk              ( clk_sys       ),
@@ -333,6 +408,7 @@ knuckle_bash_game u_game (
     .status           ( status        ),
     .joy1             ( joyusb_1_full ),
     .joy2             ( joyusb_2_full ),
+    .pause            ( system_pause  ),
     .ioctl_download   ( rom_download  ),
     .ioctl_wr         ( hps_wr        ),
     .ioctl_addr       ( hps_addr      ),
@@ -364,6 +440,18 @@ knuckle_bash_game u_game (
     .oki_rom_ok       ( oki_rom_ok    ),
     .ss_save_req      ( ss_save       ),
     .ss_load_req      ( ss_load       ),
+    .ss_stream_busy   ( ss_busy       ),
+    .ss_format_valid  ( ss_format_valid ),
+    .ss_data          ( ssb[1].data   ),
+    .ss_addr          ( ssb[1].addr   ),
+    .ss_select        ( ssb[1].select ),
+    .ss_write         ( ssb[1].write  ),
+    .ss_read          ( ssb[1].read   ),
+    .ss_query         ( ssb[1].query  ),
+    .ss_data_out      ( ssb[1].data_out ),
+    .ss_ack           ( ssb[1].ack    ),
+    .ss_save_start    ( ss_stream_save),
+    .ss_load_start    ( ss_stream_load),
     .ss_active        ( ss_active     ),
     .red              ( game_r        ),
     .green            ( game_g        ),
@@ -380,9 +468,41 @@ knuckle_bash_game u_game (
 
 assign CLK_VIDEO = clk_sys;
 wire hdmi_measure_ce, hdmi_measure_hs, hdmi_measure_vs, hdmi_measure_de;
+wire [ 7:0] video_ddr_burstcnt;
+wire [28:0] video_ddr_addr;
+wire [63:0] video_ddr_din;
+wire [ 7:0] video_ddr_be;
+wire        video_ddr_we;
+wire        video_ddr_rd;
+
+assign ddr_host.rdata = DDRAM_DOUT;
+assign ddr_host.busy = DDRAM_BUSY;
+assign ddr_host.rdata_ready = DDRAM_DOUT_READY;
+assign DDRAM_BURSTCNT = ddr_host.burstcnt;
+assign DDRAM_ADDR = ddr_host.addr[28:0];
+assign DDRAM_DIN = ddr_host.wdata;
+assign DDRAM_BE = ddr_host.byteenable;
+assign DDRAM_WE = ddr_host.write;
+assign DDRAM_RD = ddr_host.read;
+
+assign ddr_video.acquire = 1'b1;
+assign ddr_video.addr = {3'd0, video_ddr_addr};
+assign ddr_video.wdata = video_ddr_din;
+assign ddr_video.read = video_ddr_rd;
+assign ddr_video.write = video_ddr_we;
+assign ddr_video.burstcnt = video_ddr_burstcnt;
+assign ddr_video.byteenable = video_ddr_be;
+
+ddr_mux u_ddr_mux (
+    .clk ( clk_sys   ),
+    .x   ( ddr_host  ),
+    .a   ( ddr_ss    ),
+    .b   ( ddr_video )
+);
+
 knuckle_bash_video u_video (
     .clk(clk_sys), .reset(game_reset), .status(status[63:0]),
-    .pxl_cen(game_pxl_cen), .red(game_r), .green(game_g), .blue(game_b),
+    .pxl_cen(game_pxl_cen), .red(pause_r), .green(pause_g), .blue(pause_b),
     .hs_n(game_hs), .vs_n(game_vs),
     .hblank(game_hblank), .vblank(game_vblank),
     .direct_video(direct_video), .forced_scandoubler(forced_scandoubler),
@@ -404,9 +524,9 @@ knuckle_bash_video u_video (
     .fb_force_blank(),
     .fb_base(), .fb_stride(), .fb_vbl(1'b0), .fb_ll(1'b0),
 `endif
-    .ddram_busy(DDRAM_BUSY), .ddram_burstcnt(DDRAM_BURSTCNT),
-    .ddram_addr(DDRAM_ADDR), .ddram_din(DDRAM_DIN), .ddram_be(DDRAM_BE),
-    .ddram_we(DDRAM_WE), .ddram_rd(DDRAM_RD)
+    .ddram_busy(ddr_video.busy), .ddram_burstcnt(video_ddr_burstcnt),
+    .ddram_addr(video_ddr_addr), .ddram_din(video_ddr_din), .ddram_be(video_ddr_be),
+    .ddram_we(video_ddr_we), .ddram_rd(video_ddr_rd)
 );
 assign VGA_F1    = 1'b0;
 assign VGA_SCALER = 1'b0;
@@ -415,8 +535,8 @@ assign HDMI_FREEZE = ss_active;
 assign HDMI_BLACKOUT = 1'b0;
 assign HDMI_BOB_DEINT = 1'b0;
 
-assign AUDIO_L = game_audio_l;
-assign AUDIO_R = game_audio_r;
+assign AUDIO_L = system_pause ? 16'sd0 : game_audio_l;
+assign AUDIO_R = system_pause ? 16'sd0 : game_audio_r;
 assign AUDIO_S = 1'b1;
 assign AUDIO_MIX = 2'b00;
 
