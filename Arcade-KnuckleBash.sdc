@@ -78,10 +78,12 @@ set_multicycle_path -setup -from $v25_cpu_keepers -to $v25_cpu_keepers 5
 set_multicycle_path -hold  -from $v25_cpu_keepers -to $v25_cpu_keepers 4
 
 # The skeleton raster outputs sample only on the 6.75 MHz pixel enable.
+# 'de' is deliberately absent: game_de has no consumer in Arcade-KnuckleBash.sv,
+# so synthesis removes the register and the filter would match no keeper.
 set_multicycle_path -setup -end -from [get_clocks {emu|pll|raizingpll_inst|altera_pll_i|general[4].gpll~PLL_OUTPUT_COUNTER|divclk}] \
-    -to [get_keepers {emu:emu|knuckle_bash_game:u_game|red[*] emu:emu|knuckle_bash_game:u_game|green[*] emu:emu|knuckle_bash_game:u_game|blue[*] emu:emu|knuckle_bash_game:u_game|hs emu:emu|knuckle_bash_game:u_game|vs emu:emu|knuckle_bash_game:u_game|de}] 14
+    -to [get_keepers {emu:emu|knuckle_bash_game:u_game|red[*] emu:emu|knuckle_bash_game:u_game|green[*] emu:emu|knuckle_bash_game:u_game|blue[*] emu:emu|knuckle_bash_game:u_game|hs emu:emu|knuckle_bash_game:u_game|vs}] 14
 set_multicycle_path -hold -end -from [get_clocks {emu|pll|raizingpll_inst|altera_pll_i|general[4].gpll~PLL_OUTPUT_COUNTER|divclk}] \
-    -to [get_keepers {emu:emu|knuckle_bash_game:u_game|red[*] emu:emu|knuckle_bash_game:u_game|green[*] emu:emu|knuckle_bash_game:u_game|blue[*] emu:emu|knuckle_bash_game:u_game|hs emu:emu|knuckle_bash_game:u_game|vs emu:emu|knuckle_bash_game:u_game|de}] 13
+    -to [get_keepers {emu:emu|knuckle_bash_game:u_game|red[*] emu:emu|knuckle_bash_game:u_game|green[*] emu:emu|knuckle_bash_game:u_game|blue[*] emu:emu|knuckle_bash_game:u_game|hs emu:emu|knuckle_bash_game:u_game|vs}] 13
 
 # Every register in the hq2x blender advances on ce_x4i. sys/scandoubler.v
 # places it at pc_in == pixsz4, pixsz2, pixsz2+pixsz4 and pixsz. Both mixers
