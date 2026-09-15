@@ -57,7 +57,7 @@ set_global_assignment -name VERILOG_MACRO "JTFRAME_RFSH_WC=11"
 set_global_assignment -name VERILOG_MACRO "JTFRAME_RFSH_N=11'd1"
 set_global_assignment -name VERILOG_MACRO "JTFRAME_RFSH_M=11'd1536"
 
-set_global_assignment -name SEED 1
+set_global_assignment -name SEED 6
 set_global_assignment -name FLOW_ENABLE_RTL_VIEWER OFF
 
 set_instance_assignment -name SLEW_RATE 0 -to SDRAM_A[*]
